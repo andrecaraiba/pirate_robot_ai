@@ -1,9 +1,10 @@
 import torch
+from torch.distributions import Categorical
 import random
 import numpy as np
 from collections import deque
 from environment import RobotGame, Direction, Point
-from model import Linear_QNet, QTrainer
+from model import Linear_QNet, QTrainer, PolicyNet, PolicyTrainer
 from helper import plot
 
 BLOCK_SIZE = 100
@@ -23,8 +24,12 @@ class Agent:
         self.epsilon = 0 # randomness
         self.gamma = 0 # discount rate
         self.memory = deque(maxlen=MAX_MEMORY) # popleft()
-        self.model = Linear_QNet(16, 256, 4)
-        self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
+        self.store_ep = deque(maxlen=MAX_MEMORY)
+        self.model = PolicyNet(16, 256, 4)
+        self.trainer = PolicyTrainer(self.model, lr=LR, gamma=self.gamma)
+        #self.model = Linear_QNet(16, 256, 4)
+        #self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
+
 
         
     def get_state(self, game):
@@ -118,6 +123,8 @@ class Agent:
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
 
+    def store_episode(self, state, action, reward):
+        self.store_ep.append((state, action, reward))
 
     def train_long_memory(self):
         if len(self.memory) > BATCH_SIZE:
@@ -131,8 +138,18 @@ class Agent:
 
     def train_short_memory(self, state, action, reward, next_state, done):
         self.trainer.train_step(state, action, reward, next_state, done)
+    
+    def train_policy(self):
+        if len(self.memory) > BATCH_SIZE:
+            mini_sample = random.sample(self.store_ep, BATCH_SIZE)
+        else:
+            mini_sample = self.store_ep
 
-    def get_action(self, state):
+        states, actions, rewards = zip(*mini_sample)
+        print("rewards: ", rewards)
+        self.trainer.train_step(states, actions, rewards)
+
+    def get_action(self, state): # mudar para que ele possa agir de acordo com a policy
         self.epsilon = 80 - self.n_games
         final_move = [0, 0, 0, 0]
         if random.randint(0, 200) < self.epsilon:
@@ -143,6 +160,17 @@ class Agent:
             prediction = self.model(state0)
             move = torch.argmax(prediction).item()
             final_move[move] = 1
+
+        return final_move
+    
+    def get_action_police(self, state):
+        final_move = [0, 0, 0, 0]
+        state0 = torch.tensor(state, dtype=torch.float)
+        state0 = torch.unsqueeze(state0, 0)
+        prediction = self.model(state0)
+        m = Categorical(prediction)
+        move = m.sample()
+        final_move[move] = 1
 
         return final_move
 
@@ -163,22 +191,28 @@ def train():
         state_old = agent.get_state(game)
 
         #get move
-        final_move = agent.get_action(state_old)
+        #final_move = agent.get_action(state_old)
+        final_move = agent.get_action_police(state_old)   
 
         reward, game_over, score = game.play_step(final_move)
-        state_new = agent.get_state(game)
+
+        #store episode
+        agent.store_episode(state_old, final_move, reward) 
+
+        #state_new = agent.get_state(game)  #remove
 
         #train short memory
-        agent.train_short_memory(state_old, final_move, reward, state_new, game_over)
-        
+        #agent.train_short_memory(state_old, final_move, reward, state_new, game_over) #remove
+                
         #remember
-        agent.remember(state_old, final_move, reward, state_new, game_over)
+        #agent.remember(state_old, final_move, reward, state_new, game_over)  #remove
         
         if game_over:
             #train long memory, plot result
-            game.reset()
             agent.n_games += 1
-            agent.train_long_memory()
+            agent.train_policy()
+            #agent.train_long_memory() #remove
+            game.reset()
         
             if score > record:
                 record = score
